@@ -1,0 +1,213 @@
+name: Release patched stable dae
+
+on:
+  schedule:
+    # Check away from the top of the hour to reduce scheduling delays.
+    - cron: "37 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild the latest stable upstream release
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: patched-stable-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: daeuniverse/dae
+  UPSTREAM_BRANCH: main
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out patch branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Prepare downstream patch set
+        id: patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The fork is kept rebased on upstream, so only commits after the
+          # merge base are downstream patches.
+          git fetch --force --no-tags \
+            "https://github.com/${UPSTREAM_REPOSITORY}.git" \
+            "refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
+          patch_base=$(git merge-base HEAD "refs/remotes/upstream/${UPSTREAM_BRANCH}")
+          git log --oneline "${patch_base}..HEAD"
+          git format-patch --binary --stdout "${patch_base}..HEAD" -- \
+            . ':(exclude).github/workflows/**' > "${RUNNER_TEMP}/dae.patch"
+          test -s "${RUNNER_TEMP}/dae.patch"
+          patch_sha=$(sha256sum "${RUNNER_TEMP}/dae.patch" | awk '{print $1}')
+          echo "sha256=${patch_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Find latest stable upstream release
+        id: release
+        shell: bash
+        env:
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
+          PATCH_SHA: ${{ steps.patch.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          upstream_tag=$(gh api "repos/${UPSTREAM_REPOSITORY}/releases/latest" --jq '.tag_name')
+          test -n "${upstream_tag}"
+          release_tag="${upstream_tag}-naive"
+
+          needs_build=true
+          if [[ "${FORCE}" != "true" ]] && \
+             release_body=$(gh release view "${release_tag}" \
+               --repo "${GITHUB_REPOSITORY}" --json body --jq '.body' 2>/dev/null); then
+            if grep -Fq "Patch set: ${PATCH_SHA}" <<< "${release_body}"; then
+              needs_build=false
+            fi
+          fi
+
+          echo "upstream_tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+          echo "needs_build=${needs_build}" >> "${GITHUB_OUTPUT}"
+
+      - name: Apply patches to upstream release
+        if: steps.release.outputs.needs_build == 'true'
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --force upstream \
+            "refs/tags/${UPSTREAM_TAG}:refs/tags/upstream/${UPSTREAM_TAG}"
+          git switch --detach "refs/tags/upstream/${UPSTREAM_TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git am --3way "${RUNNER_TEMP}/dae.patch"
+
+      - name: Set up Go
+        if: steps.release.outputs.needs_build == 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install build dependencies
+        if: steps.release.outputs.needs_build == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y clang-15 llvm-15
+
+      - name: Download dependencies
+        if: steps.release.outputs.needs_build == 'true'
+        run: |
+          set -euo pipefail
+          git submodule update --init --recursive
+          go mod download
+
+      - name: Test patched source
+        if: steps.release.outputs.needs_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Use the release GOEXPERIMENT set, as upstream's unit tests do.
+          eval "export $(make -s print-goexperiment-env)"
+          go test -tags dae_stub_ebpf,with_purego ./...
+
+      - name: Build Linux amd64 binary
+        if: steps.release.outputs.needs_build == 'true'
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          export GOOS=linux
+          export GOARCH=amd64
+          export GOAMD64=v1
+          export CGO_ENABLED=0
+          export GOFLAGS="-modcacherw"
+          export OUTPUT=dist/dae-linux-amd64
+          export VERSION="${UPSTREAM_TAG}-naive"
+          export CLANG=clang-15
+          export STRIP=llvm-strip-15
+          make
+          ./scripts/check-artifact-build-env.sh dist/dae-linux-amd64 amd64
+          ./dist/dae-linux-amd64 --version
+          (
+            cd dist
+            sha256sum dae-linux-amd64 > dae-linux-amd64.sha256
+            sha256sum --check dae-linux-amd64.sha256
+          )
+
+      - name: Publish latest release
+        if: steps.release.outputs.needs_build == 'true'
+        shell: bash
+        env:
+          PATCH_SHA: ${{ steps.patch.outputs.sha256 }}
+          UPSTREAM_TAG: ${{ steps.release.outputs.upstream_tag }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          checksum=$(awk '{print $1}' dist/dae-linux-amd64.sha256)
+
+          git tag -d "${RELEASE_TAG}" >/dev/null 2>&1 || true
+          git tag -a "${RELEASE_TAG}" "${GITHUB_SHA}" \
+            -m "dae ${UPSTREAM_TAG} with downstream patches"
+          git push --force origin "refs/tags/${RELEASE_TAG}"
+          printf '%s\n' \
+            "Based on daeuniverse/dae ${UPSTREAM_TAG}." \
+            "" \
+            "Downstream patches:" \
+            "- Cronet Naive outbound with UoT and chaining support." \
+            "- consistent_hash node selection policy." \
+            "" \
+            "Place the matching libcronet.so next to the dae binary." \
+            "" \
+            "Patch set: ${PATCH_SHA}" \
+            "SHA256: ${checksum}" > "${RUNNER_TEMP}/release-notes.md"
+
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" \
+              dist/dae-linux-amd64 \
+              dist/dae-linux-amd64.sha256 \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --latest \
+              --title "dae ${UPSTREAM_TAG} + downstream patches" \
+              --notes-file "${RUNNER_TEMP}/release-notes.md"
+          else
+            gh release create "${RELEASE_TAG}" \
+              dist/dae-linux-amd64 \
+              dist/dae-linux-amd64.sha256 \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --latest \
+              --title "dae ${UPSTREAM_TAG} + downstream patches" \
+              --notes-file "${RUNNER_TEMP}/release-notes.md"
+          fi
+
+      - name: Delete all old releases
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[].tag_name' | while IFS= read -r old_tag; do
+              if [[ -n "${old_tag}" && "${old_tag}" != "${RELEASE_TAG}" ]]; then
+                gh release delete "${old_tag}" \
+                  --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes
+              fi
+            done
