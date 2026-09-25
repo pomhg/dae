@@ -2882,7 +2882,8 @@ func (c *ControlPlane) chooseBestDnsDialerSnapshot(
 			}
 			dialerGroup := c.outbounds[outboundIndex]
 			// DNS always dial IP.
-			d, latency, err := dialerGroup.Select(&networkType, true)
+			selectionKey := dialerSelectionKey(dnsUpstream.Hostname, netip.AddrPortFrom(dAddr, dnsUpstream.Port))
+			d, latency, err := dialerGroup.SelectWithKey(&networkType, true, selectionKey)
 			if err != nil {
 				continue
 			}

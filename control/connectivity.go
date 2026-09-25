@@ -144,7 +144,8 @@ func (c *ControlPlane) resumeOutboundConnectivityUpdates(publish func(uint8, boo
 			// modes keep kernel admission open for userspace selection/fallback.
 			policy := group.GetSelectionPolicy()
 			publishHealth := c.dialMode == consts.DialMode_Ip &&
-				policy != consts.DialerSelectionPolicy_Random && policy != consts.DialerSelectionPolicy_Fixed
+				policy != consts.DialerSelectionPolicy_Random && policy != consts.DialerSelectionPolicy_Fixed &&
+				policy != consts.DialerSelectionPolicy_ConsistentHash
 			for _, healthKey := range dialer.StandardHealthKeys() {
 				networkType := healthKey.NetworkType()
 				alive := true

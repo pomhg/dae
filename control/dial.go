@@ -9,7 +9,9 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"net"
 	"net/netip"
+	"strings"
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
@@ -104,6 +106,26 @@ func endpointNetworkTypeForSelection(requestedNetworkType *dialer.NetworkType, a
 	return &endpointType
 }
 
+// dialerSelectionKey returns a stable destination-host key. Ports are omitted
+// so traffic to different services on the same host stays on the same node.
+func dialerSelectionKey(domain string, dst netip.AddrPort) string {
+	host := strings.TrimSpace(domain)
+	if host == "" {
+		return dst.Addr().Unmap().String()
+	}
+	if addrPort, err := netip.ParseAddrPort(host); err == nil {
+		return addrPort.Addr().Unmap().String()
+	}
+	if splitHost, _, err := net.SplitHostPort(host); err == nil {
+		host = splitHost
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.Unmap().String()
+	}
+	return host
+}
+
 func (c *ControlPlane) chooseProxyDialer(p *proxyDialParam) (*proxyDialResult, error) {
 	outboundIndex := p.Outbound
 	domain := p.Domain
@@ -183,12 +205,13 @@ func (c *ControlPlane) chooseProxyDialer(p *proxyDialParam) (*proxyDialResult, e
 	}
 
 	strictIpVersion := dialIp
-	d, _, admissionNetworkType, err := outbound.SelectWithExclusionResult(selectionNetworkType, strictIpVersion, p.Excluded)
+	selectionKey := dialerSelectionKey(domain, dst)
+	d, _, admissionNetworkType, err := outbound.SelectWithExclusionResultForKey(selectionNetworkType, strictIpVersion, selectionKey, p.Excluded)
 	if stderrors.Is(err, ob.ErrNoAliveDialer) {
 		// Fallback for UDP/TCP: if selection failed (probably due to health check fail),
 		// try the other IP version if strictIpVersion is not absolutely required by domain routing.
 		altType := alternateNetworkType(selectionNetworkType)
-		d, _, admissionNetworkType, err = outbound.SelectWithExclusionResult(altType, false, p.Excluded)
+		d, _, admissionNetworkType, err = outbound.SelectWithExclusionResultForKey(altType, false, selectionKey, p.Excluded)
 		if err == nil {
 			selectionNetworkType = altType
 		}

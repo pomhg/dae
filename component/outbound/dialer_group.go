@@ -324,6 +324,13 @@ func (g *DialerGroup) Select(networkType *dialer.NetworkType, strictIpVersion bo
 	return d, latency, err
 }
 
+// SelectWithKey selects a dialer using selectionKey when the configured policy
+// needs a stable per-destination key. Other policies ignore selectionKey.
+func (g *DialerGroup) SelectWithKey(networkType *dialer.NetworkType, strictIpVersion bool, selectionKey string) (d *dialer.Dialer, latency time.Duration, err error) {
+	d, latency, _, err = g.SelectWithExclusionResultForKey(networkType, strictIpVersion, selectionKey, nil)
+	return d, latency, err
+}
+
 // SelectWithExclusion selects a dialer from group according to selectionPolicy.
 // The 'excluded' parameter specifies a dialer to avoid during selection (for
 // failover scenarios). Note that Fixed policy ignores 'excluded' because user
@@ -334,14 +341,20 @@ func (g *DialerGroup) Select(networkType *dialer.NetworkType, strictIpVersion bo
 // domain actually used to admit that dialer. For ordinary selections this is
 // the requested network type; for data-UDP recovery it may be DNS-UDP or TCP.
 func (g *DialerGroup) SelectWithExclusionResult(networkType *dialer.NetworkType, strictIpVersion bool, excluded *dialer.Dialer) (d *dialer.Dialer, latency time.Duration, selectedNetworkType *dialer.NetworkType, err error) {
+	return g.SelectWithExclusionResultForKey(networkType, strictIpVersion, "", excluded)
+}
+
+// SelectWithExclusionResultForKey is SelectWithExclusionResult with a stable
+// selection key for policies such as consistent_hash.
+func (g *DialerGroup) SelectWithExclusionResultForKey(networkType *dialer.NetworkType, strictIpVersion bool, selectionKey string, excluded *dialer.Dialer) (d *dialer.Dialer, latency time.Duration, selectedNetworkType *dialer.NetworkType, err error) {
 	state := g.currentSelectionState()
 	policy := state.policy
-	d, latency, selectedNetworkType, err = g._select(networkType, state, policy, excluded)
+	d, latency, selectedNetworkType, err = g._select(networkType, state, policy, selectionKey, excluded)
 	if !strictIpVersion && errors.Is(err, ErrNoAliveDialer) {
 		// Fallback to another ipversion. Use local copy to avoid modifying the original networkType if it's passed by reference.
 		nt := *networkType
 		nt.IpVersion = (consts.IpVersion_X - networkType.IpVersion.ToIpVersionType()).ToIpVersionStr()
-		d, latency, selectedNetworkType, err = g._select(&nt, state, policy, excluded)
+		d, latency, selectedNetworkType, err = g._select(&nt, state, policy, selectionKey, excluded)
 		// Do not return early on failure: the single-dialer fallback below is
 		// an availability floor and must not be bypassed by the lenient path
 		// (which should never be worse than the strict one).
@@ -354,7 +367,7 @@ func (g *DialerGroup) SelectWithExclusionResult(networkType *dialer.NetworkType,
 		if d, _, selectedNetworkType, err = g._select(networkType, state, DialerSelectionPolicy{
 			Policy:     consts.DialerSelectionPolicy_Fixed,
 			FixedIndex: 0,
-		}, excluded); err != nil {
+		}, selectionKey, excluded); err != nil {
 			return nil, 0, nil, err
 		}
 		return d, dialer.Timeout, selectedNetworkType, nil
@@ -362,7 +375,7 @@ func (g *DialerGroup) SelectWithExclusionResult(networkType *dialer.NetworkType,
 	return nil, latency, selectedNetworkType, err
 }
 
-func (g *DialerGroup) _select(networkType *dialer.NetworkType, state *dialerGroupSelectionState, policy DialerSelectionPolicy, excluded *dialer.Dialer) (d *dialer.Dialer, latency time.Duration, selectedNetworkType *dialer.NetworkType, err error) {
+func (g *DialerGroup) _select(networkType *dialer.NetworkType, state *dialerGroupSelectionState, policy DialerSelectionPolicy, selectionKey string, excluded *dialer.Dialer) (d *dialer.Dialer, latency time.Duration, selectedNetworkType *dialer.NetworkType, err error) {
 	if len(g.Dialers) == 0 {
 		return nil, 0, nil, fmt.Errorf("no dialer in this group")
 	}
@@ -372,6 +385,18 @@ func (g *DialerGroup) _select(networkType *dialer.NetworkType, state *dialerGrou
 		for i := range count {
 			a := state.aliveDialerSets[networkTypes[i].Index()]
 			d := a.GetRandExcluded(excluded)
+			if d != nil {
+				selected := preferAlternateSelectionNetworkType(d, &networkTypes[i])
+				return d, 0, selected, nil
+			}
+		}
+		return nil, time.Hour, nil, ErrNoAliveDialer
+
+	case consts.DialerSelectionPolicy_ConsistentHash:
+		networkTypes, count := g.selectionNetworkTypes(networkType, policy)
+		for i := range count {
+			a := state.aliveDialerSets[networkTypes[i].Index()]
+			d := a.GetConsistentHash(selectionKey, excluded)
 			if d != nil {
 				selected := preferAlternateSelectionNetworkType(d, &networkTypes[i])
 				return d, 0, selected, nil
@@ -510,7 +535,7 @@ func (g *DialerGroup) publishAliveChange(alive bool, networkType *dialer.Network
 		case set != nil:
 			alive = set.Len() > 0
 		case groupPublishesOptimisticAlive(g.GetSelectionPolicy()):
-			// Fixed and Random select in userspace and never need the kernel to
+			// Fixed, Random and ConsistentHash select in userspace and never need the kernel to
 			// gate admission for the group, so a missing set means "publish
 			// alive" - exactly what the connectivity publication path does for
 			// these policies. Trusting the incoming bool here could write 0 and
@@ -546,11 +571,12 @@ func (g *DialerGroup) publishAliveChange(alive bool, networkType *dialer.Network
 
 // groupPublishesOptimisticAlive reports whether the group's selection policy
 // keeps the kernel outbound-connectivity slot open regardless of per-dialer
-// health. Fixed and Random pick in userspace, so the kernel must always admit
-// flows for the group (mirrors resumeOutboundConnectivityUpdates).
+// health. Fixed, Random and ConsistentHash pick in userspace, so the kernel must
+// always admit flows for the group (mirrors resumeOutboundConnectivityUpdates).
 func groupPublishesOptimisticAlive(policy consts.DialerSelectionPolicy) bool {
 	switch policy {
-	case consts.DialerSelectionPolicy_Fixed, consts.DialerSelectionPolicy_Random:
+	case consts.DialerSelectionPolicy_Fixed, consts.DialerSelectionPolicy_Random,
+		consts.DialerSelectionPolicy_ConsistentHash:
 		return true
 	default:
 		return false
@@ -592,6 +618,7 @@ func (g *DialerGroup) unregisterAliveDialerSets(aliveDialerSets [8]*dialer.Alive
 func policyNeedsAliveState(policy consts.DialerSelectionPolicy) bool {
 	switch policy {
 	case consts.DialerSelectionPolicy_Random,
+		consts.DialerSelectionPolicy_ConsistentHash,
 		consts.DialerSelectionPolicy_MinLastLatency,
 		consts.DialerSelectionPolicy_MinAverage10Latencies,
 		consts.DialerSelectionPolicy_MinMovingAverageLatencies:

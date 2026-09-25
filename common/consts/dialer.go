@@ -24,6 +24,8 @@ type DialerSelectionPolicy string
 const (
 	// DialerSelectionPolicy_Random selects a dialer randomly.
 	DialerSelectionPolicy_Random DialerSelectionPolicy = "random"
+	// DialerSelectionPolicy_ConsistentHash selects a healthy dialer by rendezvous hashing.
+	DialerSelectionPolicy_ConsistentHash DialerSelectionPolicy = "consistent_hash"
 	// DialerSelectionPolicy_Fixed always selects the first dialer.
 	DialerSelectionPolicy_Fixed DialerSelectionPolicy = "fixed"
 	// DialerSelectionPolicy_MinAverage10Latencies selects the dialer with minimum average latency of last 10 checks.

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/sirupsen/logrus"
@@ -32,6 +33,7 @@ type minLatency struct {
 type aliveEntry struct {
 	dialer         *Dialer
 	sortingLatency time.Duration
+	hashSeed       uint64
 }
 
 // AliveDialerSet assumes mapping between index and dialer MUST remain unchanged.
@@ -128,6 +130,37 @@ func (a *AliveDialerSet) GetRandExcluded(excluded *Dialer) *Dialer {
 		}
 	}
 
+	return chosen
+}
+
+// GetConsistentHash selects a dialer using highest-random-weight (rendezvous)
+// hashing. The same key and healthy dialer set always produce the same result;
+// adding or removing a dialer only remaps keys assigned to the changed dialer.
+func (a *AliveDialerSet) GetConsistentHash(key string, excluded *Dialer) *Dialer {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	var (
+		chosen    *Dialer
+		bestScore uint64
+		bestSeed  uint64
+	)
+	for i := range a.aliveEntries {
+		entry := &a.aliveEntries[i]
+		if entry.dialer == excluded {
+			continue
+		}
+
+		var hash xxhash.Digest
+		hash.ResetWithSeed(entry.hashSeed)
+		_, _ = hash.WriteString(key)
+		score := hash.Sum64()
+		if chosen == nil || score > bestScore || score == bestScore && entry.hashSeed > bestSeed {
+			chosen = entry.dialer
+			bestScore = score
+			bestSeed = entry.hashSeed
+		}
+	}
 	return chosen
 }
 
@@ -332,6 +365,7 @@ func (a *AliveDialerSet) NotifyLatencyChange(dialer *Dialer, alive bool) {
 			a.aliveEntries = append(a.aliveEntries, aliveEntry{
 				dialer:         dialer,
 				sortingLatency: rawLatency + a.dialerToLatencyOffset[dialer],
+				hashSeed:       dialerConsistentHashSeed(dialer),
 			})
 		}
 	} else {
@@ -510,6 +544,25 @@ func (a *AliveDialerSet) NotifyLatencyChange(dialer *Dialer, alive bool) {
 			}).Infof("Group selects dialer")
 		}
 	}
+}
+
+func dialerConsistentHashSeed(dialer *Dialer) uint64 {
+	if dialer == nil || dialer.property == nil {
+		return 0
+	}
+	p := dialer.property
+	var identity strings.Builder
+	identity.Grow(len(p.SubscriptionTag) + len(p.Link) + len(p.Protocol) + len(p.Address) + len(p.Name) + 4)
+	identity.WriteString(p.SubscriptionTag)
+	identity.WriteByte(0)
+	identity.WriteString(p.Link)
+	identity.WriteByte(0)
+	identity.WriteString(p.Protocol)
+	identity.WriteByte(0)
+	identity.WriteString(p.Address)
+	identity.WriteByte(0)
+	identity.WriteString(p.Name)
+	return xxhash.Sum64String(identity.String())
 }
 
 func (a *AliveDialerSet) calcMinLatency() {

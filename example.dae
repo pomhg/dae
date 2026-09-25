@@ -319,6 +319,9 @@ group {
         # Randomly select a node from the group for every connection.
         #policy: random
 
+        # Consistently select a healthy node by destination host.
+        #policy: consistent_hash
+
         # Select the first node from the group for every connection.
         #policy: fixed(0)
 

@@ -85,8 +85,9 @@ Available functions: name, subtag. Not operator is supported.
 Available keys in name function: keyword, regex. No key indicates full match.
 Available keys in subtag function: regex. No key indicates full match.`,
 	"policy": `Dialer selection policy. For each new connection, select a node as dialer from group by this policy.
-Available values: random, fixed, min, min_avg10, min_moving_avg.
+Available values: random, consistent_hash, fixed, min, min_avg10, min_moving_avg.
 random: Select randomly.
+consistent_hash: Select a healthy node by consistent hashing of the destination host. The same destination stays on the same node while it is healthy.
 fixed: Select the fixed node. Connectivity check will be disabled.
 min: Select node by the latency of last check.
 min_avg10: Select node by the average of latencies of last 10 checks.

@@ -8,6 +8,7 @@ package outbound
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -288,6 +289,104 @@ func TestDialerGroup_Select_Random(t *testing.T) {
 			t.Fail()
 		}
 		t.Logf("count[%v]: %v", i, c)
+	}
+}
+
+func newConsistentHashTestGroup(t *testing.T, nodeCount int) (*DialerGroup, []*dialer.Dialer) {
+	t.Helper()
+	option := &dialer.GlobalOption{
+		Log:               log,
+		TcpCheckOptionRaw: dialer.TcpCheckOptionRaw{Raw: []string{testTcpCheckUrl}},
+		CheckDnsOptionRaw: dialer.CheckDnsOptionRaw{Raw: []string{testUdpCheckDns}},
+		CheckInterval:     15 * time.Second,
+	}
+	dialers := make([]*dialer.Dialer, nodeCount)
+	for i := range dialers {
+		dialers[i] = newDirectDialer(option)
+		dialers[i].Property().Name = fmt.Sprintf("node-%d", i)
+		dialers[i].Property().Link = fmt.Sprintf("test://node-%d", i)
+	}
+	group := NewDialerGroup(
+		option,
+		"consistent-hash-test",
+		dialers,
+		newEmptyAnnotations(len(dialers)),
+		DialerSelectionPolicy{Policy: consts.DialerSelectionPolicy_ConsistentHash},
+		func(bool, *dialer.NetworkType, bool) {},
+	)
+	return group, dialers
+}
+
+func TestDialerGroup_Select_ConsistentHashIsStickyAndHonorsExclusion(t *testing.T) {
+	g, _ := newConsistentHashTestGroup(t, 4)
+	const key = "example.com"
+
+	selected, _, err := g.SelectWithKey(TestNetworkType, true, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 100 {
+		got, _, err := g.SelectWithKey(TestNetworkType, true, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != selected {
+			t.Fatal("same consistent-hash key selected a different dialer")
+		}
+	}
+
+	fallback, _, _, err := g.SelectWithExclusionResultForKey(TestNetworkType, true, key, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallback == selected {
+		t.Fatal("consistent-hash selection did not honor exclusion")
+	}
+}
+
+func TestDialerGroup_Select_ConsistentHashMinimizesRemapping(t *testing.T) {
+	g, dialers := newConsistentHashTestGroup(t, 4)
+	const keyCount = 1000
+	before := make(map[string]*dialer.Dialer, keyCount)
+	distribution := make(map[*dialer.Dialer]int, len(dialers))
+	for i := range keyCount {
+		key := fmt.Sprintf("host-%d.example", i)
+		selected, _, err := g.SelectWithKey(TestNetworkType, true, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[key] = selected
+		distribution[selected]++
+	}
+	if len(distribution) != len(dialers) {
+		t.Fatalf("consistent-hash distribution used %d dialers, want %d", len(distribution), len(dialers))
+	}
+
+	removed := dialers[2]
+	// NotifyLatencyChange is state-revalidated, so flip the real collection.
+	removed.ReportUnavailableForced(TestNetworkType, errors.New("offline"))
+	for key, previous := range before {
+		selected, _, err := g.SelectWithKey(TestNetworkType, true, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if previous != removed && selected != previous {
+			t.Fatalf("key %q remapped after an unrelated dialer was removed", key)
+		}
+		if selected == removed {
+			t.Fatalf("key %q selected a removed dialer", key)
+		}
+	}
+
+	removed.MarkAliveForReloadFallback(TestNetworkType)
+	for key, previous := range before {
+		selected, _, err := g.SelectWithKey(TestNetworkType, true, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if selected != previous {
+			t.Fatalf("key %q did not return to its original dialer", key)
+		}
 	}
 }
 
@@ -923,6 +1022,7 @@ func TestGroupPublishesOptimisticAlive(t *testing.T) {
 	}{
 		{consts.DialerSelectionPolicy_Fixed, true},
 		{consts.DialerSelectionPolicy_Random, true},
+		{consts.DialerSelectionPolicy_ConsistentHash, true},
 		{consts.DialerSelectionPolicy_MinLastLatency, false},
 		{consts.DialerSelectionPolicy_MinAverage10Latencies, false},
 		{consts.DialerSelectionPolicy_MinMovingAverageLatencies, false},
