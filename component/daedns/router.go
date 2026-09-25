@@ -42,7 +42,7 @@ type NodeMeta struct {
 	SubscriptionTag string
 	Name            string
 	Link            string
-	AddressHost     string
+	AddressHosts    []string
 }
 
 type subscriptionMeta struct {
@@ -347,11 +347,11 @@ func (r *Router) WrapSubscriptionDialer(base netproxy.Dialer, rawSubscription st
 		Tag:  tag,
 		Link: link,
 	})
-	controlHost := subscriptionHost(link)
-	if !ok && r.requestMatcher == nil && controlHost == "" {
+	controlHosts := normalizeControlHosts(subscriptionHost(link))
+	if !ok && r.requestMatcher == nil && len(controlHosts) == 0 {
 		return base, nil
 	}
-	return newResolvingDialer(base, r, upstream, upstream, controlHost), nil
+	return newResolvingDialer(base, r, upstream, upstream, controlHosts), nil
 }
 
 func (r *Router) WrapNodeDialer(base netproxy.Dialer, meta NodeMeta) (netproxy.Dialer, error) {
@@ -368,10 +368,28 @@ func (r *Router) WrapNodeDialer(base netproxy.Dialer, meta NodeMeta) (netproxy.D
 	if !ok {
 		upstream, ok = r.nodeMatcher.Match(meta)
 	}
-	if !ok && r.requestMatcher == nil && meta.AddressHost == "" {
+	controlHosts := normalizeControlHosts(meta.AddressHosts...)
+	if !ok && r.requestMatcher == nil && len(controlHosts) == 0 {
 		return base, nil
 	}
-	return newResolvingDialer(base, r, upstream, upstream, meta.AddressHost), nil
+	return newResolvingDialer(base, r, upstream, upstream, controlHosts), nil
+}
+
+func normalizeControlHosts(candidates ...string) []string {
+	hosts := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, host := range candidates {
+		host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+		if host == "" {
+			continue
+		}
+		if _, loaded := seen[host]; loaded {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+	return hosts
 }
 
 func (r *Router) compileSubscriptionMatcher(rules []*config_parser.RoutingRule) (*compiledMatcher[subscriptionMeta], error) {
@@ -748,7 +766,7 @@ type resolvingDialer struct {
 	router              atomic.Pointer[Router]
 	upstreamName        string
 	controlUpstreamName string
-	controlHost         string
+	controlHosts        []string
 }
 
 var errResolvingDialerRetired = errors.New("dns resolving dialer retired")
@@ -758,13 +776,13 @@ func newResolvingDialer(
 	router *Router,
 	upstreamName string,
 	controlUpstreamName string,
-	controlHost string,
+	controlHosts []string,
 ) *resolvingDialer {
 	d := &resolvingDialer{
 		Dialer:              base,
 		upstreamName:        upstreamName,
 		controlUpstreamName: controlUpstreamName,
-		controlHost:         controlHost,
+		controlHosts:        controlHosts,
 	}
 	d.router.Store(router)
 	return d
@@ -818,7 +836,7 @@ func (d *resolvingDialer) lookupIPAddr(ctx context.Context, network, host string
 	if router == nil {
 		return nil, errResolvingDialerRetired
 	}
-	if d.controlHost != "" && sameDNSHost(host, d.controlHost) {
+	if containsDNSHost(d.controlHosts, host) {
 		return d.lookupControlIPAddr(ctx, router, network, host)
 	}
 	ips, err := router.LookupIPAddr(ctx, d.upstreamName, network, host)
@@ -832,6 +850,15 @@ func (d *resolvingDialer) lookupIPAddr(ctx context.Context, network, host string
 		return d.lookupBaseIPAddr(ctx, network, host)
 	}
 	return ips, nil
+}
+
+func containsDNSHost(hosts []string, host string) bool {
+	for _, candidate := range hosts {
+		if sameDNSHost(host, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *resolvingDialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {

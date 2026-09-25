@@ -4,7 +4,8 @@ dae 支持以下代理协议：
 
 | 协议 | 支持细节 | URI 格式 |
 | --- | --- | --- |
-| HTTP(S)、naiveproxy | — | [HTTP(S)](#https) |
+| HTTP(S) CONNECT | — | [HTTP(S)](#https) |
+| NaiveProxy | Chromium/Cronet（Linux amd64）；HTTPS / QUIC / UoT | [NaiveProxy](#naiveproxy) |
 | Socks | **版本**： Socks4 / Socks4a / Socks5 | [Socks](#socks) |
 | VMess / VLESS | **VMess**： AEAD, alterID=0<br>**传输**： TCP / WS / gRPC / Meek / HTTPUpgrade<br>**TLS**：支持 Reality | [v2rayN](https://github.com/2dust/v2rayN/wiki/%E5%88%86%E4%BA%AB%E9%93%BE%E6%8E%A5%E6%A0%BC%E5%BC%8F%E8%AF%B4%E6%98%8E(ver-2))<br>[DuckSoft](https://github.com/XTLS/Xray-core/discussions/716) |
 | Shadowsocks | **加密**： AEAD / Stream Ciphers<br>**插件**： simple-obfs / shadow-tls (SIP003)，参阅[插件说明](#shadowsocks-插件) | [SIP002](https://shadowsocks.org/doc/sip002.html)<br>[SIP008](https://shadowsocks.org/doc/sip008.html) |
@@ -23,7 +24,15 @@ dae 支持以下代理协议：
 ### HTTP(S)
 
   ```
+  http://[[user:]pass@]hostname:port/
   https://[[user:]pass@]hostname:port/
+  ```
+
+### NaiveProxy
+
+  ```
+  naive://[[user:]pass@]hostname:port/
+  naive://[[user:]pass@]hostname:port/?mode=quic
   ```
 
 ### Socks
@@ -46,33 +55,19 @@ ShadowTLS v3 链接也可直接使用 `shadowtls://`。
 
 如果提供商要求不使用自定义 SNI，请省略 `sni`，或将其值明确设为空。
 
-## 外部代理程序
+## NaiveProxy 动态库
 
-可使用外部代理程序扩展协议支持。以下以 naiveproxy 为例。
+Linux amd64 版本的内置 NaiveProxy 使用与 sing-box 相同的 `cronet-go` Chromium 网络栈。dae 二进制不包含、也不会在构建时编译 Cronet；运行前需要把匹配版本的 `libcronet.so` 放在 dae 可执行文件的同一目录。绑定版本记录在 [`.github/CRONET_GO_VERSION`](../../.github/CRONET_GO_VERSION)，使用其他版本的动态库可能因 ABI 不匹配而加载失败。
 
-dae 和其他代理程序虽支持 HTTPS 协议，却不使用 Chromium 网络栈，因而会削弱 naiveproxy 的伪装效果。因此，建议使用外部 naiveproxy 程序。
+UDP 默认使用 sing-box 兼容的 UoT v2。可以使用查询参数调整：
 
-1. 启动 naiveproxy：
+```text
+naive://user:pass@example.com:443?uot=false
+naive://user:pass@example.com:443?uot_version=1
+naive://user:pass@example.com:443?mode=quic&quic_congestion_control=bbr2
+```
 
-   本示例让 naiveproxy 监听 HTTP 端口。HTTP 代理不支持 UDP 流量，因此使用外部代理程序时，建议优先使用 SOCKS5 端口。
-
-   ```bash
-   naiveproxy --listen=http://127.0.0.1:1090 --proxy=https://yourlink
-   ```
-
-2. 在 dae 配置的节点部分添加 `http://127.0.0.1:1090`，并在所用组中使用此节点。
-
-3. 若已绑定 WAN 接口，即填写了 `global.wan_interface`，请在 `routing` 部分靠前的位置添加以下规则。这可防止流量经 naiveproxy 后回到 dae，造成环路：
-
-   ```shell
-   pname(naiveproxy) -> must_direct
-   ```
-
-   此处 `pname` 匹配进程名。可通过查看启动命令、运行时执行 `ps -ef` 命令，或查看 dae 日志确定 naiveproxy 的进程名。
-
-   `must_direct` 表示允许包括 DNS 查询在内的全部流量直接通过，不重定向至 dae。
-
-   仅绑定 LAN 接口的用户无需执行此步骤。
+默认使用 HTTPS；设置 `mode=quic` 后使用 QUIC。还支持 `sni`、`insecure_concurrency` 和 `header.<名称>` 查询参数。Cronet 不支持跳过证书验证，因此 Naive 节点不能使用 `allowInsecure`/`skipVerify`，也不能在 `global.allow_insecure` 开启时使用。
 
 ## 兼容性说明
 

@@ -4,7 +4,8 @@ dae supports the following proxy protocols:
 
 | Protocol | Support details | URI schema |
 | --- | --- | --- |
-| HTTP(S), naiveproxy | | [HTTP(S)](#https) |
+| HTTP(S) CONNECT | | [HTTP(S)](#https) |
+| NaiveProxy | Chromium/Cronet (Linux amd64); HTTPS, QUIC, UoT | [NaiveProxy](#naiveproxy) |
 | Socks | Socks4, Socks4a, Socks5 | [Socks](#socks) |
 | VMess / VLESS | VMess: AEAD, alterID=0; TCP, WS, TLS (including Reality), gRPC, Meek, HTTPUpgrade | [v2rayN](https://github.com/2dust/v2rayN/wiki/%E5%88%86%E4%BA%AB%E9%93%BE%E6%8E%A5%E6%A0%BC%E5%BC%8F%E8%AF%B4%E6%98%8E(ver-2)), [DuckSoft](https://github.com/XTLS/Xray-core/discussions/716) |
 | Shadowsocks | AEAD ciphers, stream ciphers, simple-obfs, shadow-tls (SIP003 plugin); see [plugin notes](#shadowsocks-plugins) | [SIP002](https://shadowsocks.org/doc/sip002.html), [SIP008](https://shadowsocks.org/doc/sip008.html) |
@@ -21,7 +22,15 @@ dae supports the following proxy protocols:
 ### HTTP(S)
 
   ```
+  http://[[user:]pass@]hostname:port/
   https://[[user:]pass@]hostname:port/
+  ```
+
+### NaiveProxy
+
+  ```
+  naive://[[user:]pass@]hostname:port/
+  naive://[[user:]pass@]hostname:port/?mode=quic
   ```
 
 ### Socks
@@ -42,33 +51,19 @@ and keep `global.utls_imitate` at the default `chrome_auto`, or append
 `tlsImplementation=utls&utlsImitate=chrome` to the link query.
 If the provider expects no custom SNI, omit `sni` or keep it explicitly empty.
 
-## External proxy programs
+## NaiveProxy dynamic library
 
-Use external proxy programs to extend protocol support. The following example uses external naiveproxy.
+The built-in NaiveProxy outbound in the Linux amd64 build uses the same `cronet-go` Chromium network stack as sing-box. The dae binary does not contain or build Cronet. Before starting dae, place a matching `libcronet.so` beside the dae executable. The pinned version is recorded in [`.github/CRONET_GO_VERSION`](../../.github/CRONET_GO_VERSION); a library built from another version may fail to load because of an ABI mismatch.
 
-Although dae and other proxy programs support HTTPS, they do not use the Chromium networking stack. This weakens naiveproxy's camouflage, so an external naiveproxy program is recommended.
+UDP uses sing-box-compatible UoT v2 by default. Query parameters can change this behavior:
 
-1. Start naiveproxy:
+```text
+naive://user:pass@example.com:443?uot=false
+naive://user:pass@example.com:443?uot_version=1
+naive://user:pass@example.com:443?mode=quic&quic_congestion_control=bbr2
+```
 
-   This example opens an HTTP listening port. HTTP proxies cannot proxy UDP traffic, so prefer a Socks5 port when using an external proxy program.
-
-   ```bash
-   naiveproxy --listen=http://127.0.0.1:1090 --proxy=https://yourlink
-   ```
-
-2. Add `http://127.0.0.1:1090` to the `node` section of dae's configuration, then use this node in your group.
-
-3. If you have set `global.wan_interface`, add the following rule near the top of the `routing` section. It prevents traffic from returning to dae after passing through naiveproxy and causing a loop:
-
-   ```shell
-   pname(naiveproxy) -> must_direct
-   ```
-
-   `pname` matches the process name. Find naiveproxy's process name in its startup command, the output of `ps -ef` while it is running, or dae's logs.
-
-   `must_direct` sends all traffic, including DNS queries, directly without redirecting it to dae.
-
-   Skip this step if you only bind the LAN interface.
+HTTPS is used by default. Set `mode=quic` to use QUIC. The `sni`, `insecure_concurrency`, and `header.<name>` query parameters are also supported. Cronet does not support disabling certificate verification, so a Naive node cannot use `allowInsecure`/`skipVerify` or be used while `global.allow_insecure` is enabled.
 
 ## Compatibility notes
 

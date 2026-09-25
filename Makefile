@@ -37,6 +37,9 @@ else
 endif
 
 GOARCH ?= $(shell go env GOARCH)
+ifeq ($(GOARCH),amd64)
+	NAIVE_BUILD_TAG := with_purego,
+endif
 
 # Single owner of the "dae trace is not built for this GOARCH" declaration.
 # An arch not listed here must build trace or fail loudly: a silent trace-less
@@ -98,7 +101,7 @@ dae: export CGO_ENABLED=0
 endif
 dae: ebpf
 	@echo $(CFLAGS)
-	go build -tags=$(shell cat $(BUILD_TAGS_FILE)) -o $(OUTPUT) $(BUILD_ARGS) .
+	go build -tags=$(NAIVE_BUILD_TAG)$(shell cat $(BUILD_TAGS_FILE)) -o $(OUTPUT) $(BUILD_ARGS) .
 ## End Dae Build
 
 ## Begin Git Submodules

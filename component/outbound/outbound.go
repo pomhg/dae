@@ -10,7 +10,6 @@ import (
 	_ "github.com/daeuniverse/outbound/dialer/http"
 	_ "github.com/daeuniverse/outbound/dialer/hysteria2"
 	_ "github.com/daeuniverse/outbound/dialer/juicity"
-	_ "github.com/daeuniverse/outbound/dialer/naive"
 	_ "github.com/daeuniverse/outbound/dialer/shadowsocks"
 	_ "github.com/daeuniverse/outbound/dialer/shadowsocksr"
 	_ "github.com/daeuniverse/outbound/dialer/socks"

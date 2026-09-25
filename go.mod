@@ -17,6 +17,8 @@ require (
 	github.com/olicesx/quic-go v0.0.0-20260910141758-62d80bbebb5b
 	github.com/panjf2000/ants/v2 v2.11.5
 	github.com/safchain/ethtool v0.7.0
+	github.com/sagernet/cronet-go v0.0.0-20260807162344-ec9a39c5ba3b
+	github.com/sagernet/sing v0.8.9
 	github.com/shirou/gopsutil/v4 v4.26.1
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
@@ -49,7 +51,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-rc2 v0.0.0-20150621095337-8a9021637152 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
-	github.com/ebitengine/purego v0.9.1 // indirect
+	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
 	github.com/google/pprof v0.0.0-20260202012954-cb029daf43ef // indirect
@@ -67,7 +69,6 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.25 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
-	github.com/sagernet/sing v0.6.0 // indirect
 	github.com/sagernet/sing-shadowtls v0.2.0 // indirect
 	github.com/samber/lo v1.52.0 // indirect
 	github.com/samber/oops v1.21.0 // indirect

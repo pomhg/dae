@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/daeuniverse/dae/component/daedns"
-	D "github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/dialer/stickyip"
 	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/sirupsen/logrus"
@@ -40,7 +39,7 @@ func NewFromLinkWithProxyCacheContext(ctx context.Context, gOption *GlobalOption
 	scopedBaseDialer := scopeTransportCacheDialer(baseDialer, gOption.TransportCacheNamespace)
 
 	// First, create the protocol dialer with direct dialer to get the property
-	d, _p, err := D.NewNetproxyDialerFromLink(scopedBaseDialer, &gOption.ExtraOption, normalizedLink)
+	d, _p, err := newOwnedNetproxyDialerFromLink(scopedBaseDialer, &gOption.ExtraOption, normalizedLink)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +56,6 @@ func NewFromLinkWithProxyCacheContext(ctx context.Context, gOption *GlobalOption
 		Property:        *_p,
 		SubscriptionTag: subscriptionTag,
 	}
-	proxyHost := controlPlaneAddressHost(p.Address)
 	var metadataRetirer establishedFlowMetadataRetirer
 
 	if gOption.DaeDNS != nil {
@@ -65,7 +63,7 @@ func NewFromLinkWithProxyCacheContext(ctx context.Context, gOption *GlobalOption
 			SubscriptionTag: subscriptionTag,
 			Name:            p.Name,
 			Link:            normalizedLink,
-			AddressHost:     proxyHost,
+			AddressHosts:    controlPlaneAddressHosts(p.Address),
 		})
 		if err != nil {
 			return nil, err
@@ -73,7 +71,7 @@ func NewFromLinkWithProxyCacheContext(ctx context.Context, gOption *GlobalOption
 		metadataRetirer, _ = baseDialer.(establishedFlowMetadataRetirer)
 		scopedBaseDialer = scopeTransportCacheDialer(baseDialer, gOption.TransportCacheNamespace)
 		releaseDialer()
-		d, _p, err = D.NewNetproxyDialerFromLink(scopedBaseDialer, &gOption.ExtraOption, normalizedLink)
+		d, _p, err = newOwnedNetproxyDialerFromLink(scopedBaseDialer, &gOption.ExtraOption, normalizedLink)
 		if err != nil {
 			return nil, err
 		}
@@ -102,11 +100,11 @@ func NewFromLinkWithProxyCacheContext(ctx context.Context, gOption *GlobalOption
 			gOption.Log.WithField("proxy_address", p.Address).Debug("[DialerRegister] Creating sticky IP dialer wrapper for proxy domain")
 		}
 		stickyWrapper = stickyip.NewStickyIpDialer(baseDialer, p.Address, proxyCache)
-		scopedStickyWrapper := scopeTransportCacheDialer(stickyWrapper, gOption.TransportCacheNamespace)
+		scopedStickyWrapper := scopeTransportCacheDialer(preserveNodeResolver(stickyWrapper, baseDialer), gOption.TransportCacheNamespace)
 
 		// Re-create the protocol dialer with sticky wrapper as base.
 		releaseDialer()
-		d, _p, err = D.NewNetproxyDialerFromLink(scopedStickyWrapper, &gOption.ExtraOption, normalizedLink)
+		d, _p, err = newOwnedNetproxyDialerFromLink(scopedStickyWrapper, &gOption.ExtraOption, normalizedLink)
 		if err != nil {
 			return nil, err
 		}
@@ -150,15 +148,18 @@ func needsStickyIpCaching(addr string) bool {
 	return true
 }
 
-func controlPlaneAddressHost(addr string) string {
-	host, _, err := stickyip.SplitHostPort(addr)
-	if err != nil {
-		return ""
+// controlPlaneAddressHosts returns the domain host of every hop in a proxy
+// chain address such as "outer:443->inner:443". daedns normalizes them.
+func controlPlaneAddressHosts(addr string) []string {
+	var hosts []string
+	for _, address := range strings.Split(addr, "->") {
+		host, _, err := stickyip.SplitHostPort(strings.TrimSpace(address))
+		if err != nil || host == "" || net.ParseIP(host) != nil {
+			continue
+		}
+		hosts = append(hosts, host)
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ""
-	}
-	return host
+	return hosts
 }
 
 // normalizeShadowTLSPluginOptions normalizes shadow-tls SIP003 plugin options in ss links.
